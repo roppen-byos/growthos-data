@@ -129,6 +129,10 @@ class WarehouseTests(unittest.TestCase):
         funnel = query_for(Operation.FUNNEL_MONTHLY, self.window)
         self.assertIn("Bike Rated by Women", funnel.sql)
         self.assertIn("Bike Rated by Women", funnel.sql.split("AS bike_net")[0])
+        self.assertIn("customer_internal.customer_first_ride_lookup_immutable", funnel.sql)
+        self.assertIn("GROUP BY customer_id", funnel.sql)
+        self.assertIn("rf.time_value <= ltr_data.time_value", funnel.sql)
+        self.assertIn("OR ltr_data.time_value IS NULL", funnel.sql)
         self.assertEqual(funnel.columns, (
             "canonical_city_key", "sample_source_city", "fe_sessions", "rr", "net",
             "bike_rr", "bike_net", "auto_rr", "auto_net", "cab_rr", "cab_net",

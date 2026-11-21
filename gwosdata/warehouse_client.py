@@ -174,7 +174,10 @@ ORDER BY canonical_city_key
 """.strip()
 
 _FUNNEL_MONTHLY = f"""
-WITH rf AS (
+WITH date_bounds AS (
+    SELECT CAST(? AS varchar) AS start_day,
+           CAST(? AS varchar) AS end_day
+), rf AS (
     SELECT date_trunc('day', date(day)) AS time_value,
            customerid,
            city,
@@ -188,8 +191,17 @@ WITH rf AS (
            CAST(sum(CASE WHEN service_name IN ({_service_list(FUNNEL_CAB_SERVICES)}) THEN rr_sessions_unique_daily END) AS double) AS cab_rr,
            CAST(sum(CASE WHEN service_name IN ({_service_list(FUNNEL_CAB_SERVICES)}) THEN net_rides_daily END) AS double) AS cab_net
     FROM hive.datasets.customer_rf_daily_kpi_old_ct
-    WHERE day >= ? AND day < ?
+    CROSS JOIN date_bounds
+    WHERE day >= start_day
+      AND day < end_day
     GROUP BY 1,2,3
+), ltr_data AS (
+    SELECT min(date_trunc('day', date(platform_level_first_order_date))) AS time_value,
+           customer_id
+    FROM customer_internal.customer_first_ride_lookup_immutable
+    CROSS JOIN date_bounds
+    WHERE day = date_add('day', -1, date(end_day))
+    GROUP BY customer_id
 ), city_month AS (
     SELECT {_canonical_city_sql("city")} AS canonical_city_key,
            coalesce(nullif(trim(city), ''), 'city_not_found') AS source_city,
@@ -203,13 +215,13 @@ WITH rf AS (
            CAST(coalesce(sum(cab_rr), 0) AS bigint) AS cab_rr,
            CAST(coalesce(sum(cab_net), 0) AS bigint) AS cab_net
     FROM rf
-    GROUP BY 1,2
-    ltr_data as (
-            SELECT date_trunc(lower('day'),date(platform_level_first_order_date)) as time_value, customer_id
-            from customer_internal.customer_first_ride_lookup_immutable
-            where day = date({{end_date}})
-            group by 1,2
+    LEFT JOIN ltr_data
+        ON rf.customerid = ltr_data.customer_id
+    WHERE (
+        rf.time_value <= ltr_data.time_value
+        OR ltr_data.time_value IS NULL
     )
+    GROUP BY 1,2
 )
 SELECT canonical_city_key,
        min(source_city) AS sample_source_city,

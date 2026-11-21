@@ -113,7 +113,7 @@ updated analyst; reader commands do not perform migrations.
 
 ### Add funnel metric columns
 
-DEC-029 stores nine additive monthly all-customer funnel columns (`fe_sessions`,
+DEC-029 stores nine additive monthly FTU-eligible funnel columns (`fe_sessions`,
 `rr`, `net`, `bike_rr`, `bike_net`, `auto_rr`, `auto_net`, `cab_rr`, `cab_net`)
 in `irf.facts`. For an existing database created before these columns existed,
 run the owner-only additive migration after explicit approval (and before running
