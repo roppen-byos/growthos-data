@@ -20,14 +20,18 @@ from typing import Callable
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
-from growthos.contracts import canonical_json, month, next_month
+from growthos.contracts import BUSINESS_TIMEZONE, canonical_json, month, next_month
 from growthos.errors import GrowthOSError, reject
 
 PINNED_TRINO = "0.336.0"
-QUERY_VERSION = "irf-extraction-v1"
-BUSINESS_TIMEZONE = "Asia/Kolkata"
-BIKE_SERVICES = (
-    "link", "bike lite", "bike pink", "bike metro", "scooty", "scooty lite", "bike rated by women",
+BIKE_SERVICES = ("link",)
+FUNNEL_BIKE_SERVICES = ("Link", "Bike Pink", "Bike Metro", "Scooty", "Bike Rated by Women", "Bike Lite")
+FUNNEL_AUTO_SERVICES = ("Auto", "Auto Lite", "Auto Pet", "Auto Pool", "Auto Priority", "AutoPremium")
+FUNNEL_CAB_SERVICES = (
+    "CabEconomy", "CabPremium", "Cab Premium - Intercity", "Cab AC - Airport",
+    "Cab AC Sedan - Airport", "Cab SUV", "Cab Premium - Airport", "Cab AC Sedan",
+    "Cab Daily", "Cab Economy - Intercity", "CabAC", "Cab Priority", "Cab SUV - Airport",
+    "Cab SUV - Intercity", "Cab Economy - Airport", "Cab Premium Biz",
 )
 OPERATOR_ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
 _SAFE_SQL_PARAM = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
@@ -48,6 +52,10 @@ def _canonical_city_sql(column: str) -> str:
         "WHEN 'attingal' THEN 'trivandrum' "
         f"ELSE {slug} END"
     )
+
+
+def _service_list(names: tuple[str, ...]) -> str:
+    return ", ".join("'" + name.replace("'", "''") + "'" for name in names)
 
 
 @dataclass(frozen=True)
@@ -90,6 +98,7 @@ class Operation(str, Enum):
     INSTALLS_MONTHLY = "installs-monthly"
     REGISTRATIONS_MONTHLY = "registrations-monthly"
     FTU_MONTHLY = "ftu-monthly"
+    FUNNEL_MONTHLY = "funnel-monthly"
 
 
 EXTRACTION_OPERATIONS = (
@@ -97,6 +106,8 @@ EXTRACTION_OPERATIONS = (
     Operation.REGISTRATIONS_MONTHLY,
     Operation.FTU_MONTHLY,
 )
+FUNNEL_OPERATIONS = (Operation.FUNNEL_MONTHLY,)
+ALL_OPERATIONS = EXTRACTION_OPERATIONS + FUNNEL_OPERATIONS
 
 _INSTALLS_MONTHLY = f"""
 WITH mapped AS (
@@ -118,7 +129,6 @@ SELECT canonical_city_key,
 FROM mapped
 GROUP BY canonical_city_key
 ORDER BY canonical_city_key
-LIMIT 5001
 """.strip()
 
 _REGISTRATIONS_MONTHLY = f"""
@@ -140,7 +150,6 @@ FROM registrations_ranked
 WHERE row3 = 1
 GROUP BY canonical_city_key
 ORDER BY canonical_city_key
-LIMIT 5001
 """.strip()
 
 _FTU_MONTHLY = f"""
@@ -156,15 +165,66 @@ WITH mapped AS (
 SELECT canonical_city_key,
        min(source_city) AS sample_source_city,
        count(DISTINCT CASE WHEN platform_level_new_order_flag = 'new' THEN customer_id END) AS platform_ftu,
-       count(DISTINCT CASE WHEN platform_level_new_order_flag = 'new'
-                            AND service_key IN ('link', 'bike lite', 'bike pink', 'bike metro', 'scooty', 'scooty lite', 'bike rated by women')
-                           THEN customer_id END) AS platform_link_ftu,
+       count(DISTINCT CASE WHEN platform_level_new_order_flag = 'new' AND service_key = 'link' THEN customer_id END) AS platform_link_ftu,
        count(DISTINCT CASE WHEN platform_level_new_order_flag = 'new' AND service_key = 'auto' THEN customer_id END) AS platform_auto_ftu,
        count(DISTINCT CASE WHEN platform_level_new_order_flag = 'new' AND service_key = 'cab' THEN customer_id END) AS platform_cab_ftu
 FROM mapped
 GROUP BY canonical_city_key
 ORDER BY canonical_city_key
-LIMIT 5001
+""".strip()
+
+_FUNNEL_MONTHLY = f"""
+WITH rf AS (
+    SELECT date_trunc('day', date(day)) AS time_value,
+           customerid,
+           city,
+           CAST(max(fe_sessions_unique_daily) AS double) AS fe,
+           CAST(sum(rr_sessions_unique_daily) AS double) AS rr,
+           CAST(sum(net_rides_daily) AS double) AS net,
+           CAST(sum(CASE WHEN service_name IN ({_service_list(FUNNEL_BIKE_SERVICES)}) THEN rr_sessions_unique_daily END) AS double) AS bike_rr,
+           CAST(sum(CASE WHEN service_name IN ({_service_list(FUNNEL_BIKE_SERVICES)}) THEN net_rides_daily END) AS double) AS bike_net,
+           CAST(sum(CASE WHEN service_name IN ({_service_list(FUNNEL_AUTO_SERVICES)}) THEN rr_sessions_unique_daily END) AS double) AS auto_rr,
+           CAST(sum(CASE WHEN service_name IN ({_service_list(FUNNEL_AUTO_SERVICES)}) THEN net_rides_daily END) AS double) AS auto_net,
+           CAST(sum(CASE WHEN service_name IN ({_service_list(FUNNEL_CAB_SERVICES)}) THEN rr_sessions_unique_daily END) AS double) AS cab_rr,
+           CAST(sum(CASE WHEN service_name IN ({_service_list(FUNNEL_CAB_SERVICES)}) THEN net_rides_daily END) AS double) AS cab_net
+    FROM hive.datasets.customer_rf_daily_kpi_old_ct
+    WHERE day >= ? AND day < ?
+    GROUP BY 1,2,3
+), city_month AS (
+    SELECT {_canonical_city_sql("city")} AS canonical_city_key,
+           coalesce(nullif(trim(city), ''), 'city_not_found') AS source_city,
+           CAST(coalesce(sum(fe), 0) AS bigint) AS fe_sessions,
+           CAST(coalesce(sum(rr), 0) AS bigint) AS rr,
+           CAST(coalesce(sum(net), 0) AS bigint) AS net,
+           CAST(coalesce(sum(bike_rr), 0) AS bigint) AS bike_rr,
+           CAST(coalesce(sum(bike_net), 0) AS bigint) AS bike_net,
+           CAST(coalesce(sum(auto_rr), 0) AS bigint) AS auto_rr,
+           CAST(coalesce(sum(auto_net), 0) AS bigint) AS auto_net,
+           CAST(coalesce(sum(cab_rr), 0) AS bigint) AS cab_rr,
+           CAST(coalesce(sum(cab_net), 0) AS bigint) AS cab_net
+    FROM rf
+    GROUP BY 1,2
+    ltr_data as (
+            SELECT date_trunc(lower('day'),date(platform_level_first_order_date)) as time_value, customer_id
+            from customer_internal.customer_first_ride_lookup_immutable
+            where day = date({{end_date}})
+            group by 1,2
+    )
+)
+SELECT canonical_city_key,
+       min(source_city) AS sample_source_city,
+       sum(fe_sessions) AS fe_sessions,
+       sum(rr) AS rr,
+       sum(net) AS net,
+       sum(bike_rr) AS bike_rr,
+       sum(bike_net) AS bike_net,
+       sum(auto_rr) AS auto_rr,
+       sum(auto_net) AS auto_net,
+       sum(cab_rr) AS cab_rr,
+       sum(cab_net) AS cab_net
+FROM city_month
+GROUP BY canonical_city_key
+ORDER BY canonical_city_key
 """.strip()
 
 
@@ -173,7 +233,6 @@ class QuerySpec:
     sql: str
     parameters: tuple
     columns: tuple[str, ...]
-    max_rows: int
     kind: str
 
     @property
@@ -199,20 +258,25 @@ def query_for(operation: Operation, window: MonthWindow) -> QuerySpec:
     if not isinstance(operation, Operation) or not isinstance(window, MonthWindow):
         reject("OPERATION", "Only registered warehouse operations and validated month windows are supported.")
     if operation == Operation.AUTHORIZE:
-        return QuerySpec("SELECT 1 AS ready", (), ("ready",), 1, "authorization")
+        return QuerySpec("SELECT 1 AS ready", (), ("ready",), "authorization")
     if operation == Operation.INSTALLS_MONTHLY:
         return QuerySpec(_INSTALLS_MONTHLY, window.day_parameters, (
             "canonical_city_key", "sample_source_city", "installs",
-        ), 5000, "city_counts")
+        ), "city_counts")
     if operation == Operation.REGISTRATIONS_MONTHLY:
         return QuerySpec(_REGISTRATIONS_MONTHLY, window.day_parameters, (
             "canonical_city_key", "sample_source_city", "registrations",
-        ), 5000, "city_counts")
+        ), "city_counts")
     if operation == Operation.FTU_MONTHLY:
         return QuerySpec(_FTU_MONTHLY, window.date_parameters, (
             "canonical_city_key", "sample_source_city", "platform_ftu",
             "platform_link_ftu", "platform_auto_ftu", "platform_cab_ftu",
-        ), 5000, "city_counts")
+        ), "city_counts")
+    if operation == Operation.FUNNEL_MONTHLY:
+        return QuerySpec(_FUNNEL_MONTHLY, window.date_parameters, (
+            "canonical_city_key", "sample_source_city", "fe_sessions", "rr", "net",
+            "bike_rr", "bike_net", "auto_rr", "auto_net", "cab_rr", "cab_net",
+        ), "city_counts")
     reject("OPERATION", "Unsupported warehouse operation.")
 
 
@@ -368,8 +432,8 @@ def _bounded_string(value: object) -> bool:
 
 
 def _validate_rows(spec: QuerySpec, rows: object) -> list[dict]:
-    if not isinstance(rows, (list, tuple)) or len(rows) > spec.max_rows:
-        reject("WAREHOUSE_BOUND", "Warehouse aggregate exceeds the reviewed result bound; no partial evidence emitted.")
+    if not isinstance(rows, (list, tuple)):
+        reject("WAREHOUSE_SCHEMA", "Warehouse aggregate rows are unavailable; no partial evidence emitted.")
     if spec.kind == "authorization" and len(rows) != 1:
         reject("WAREHOUSE_SCHEMA", "A scalar aggregate must return exactly one row.")
     result, grain = [], set()
@@ -519,7 +583,7 @@ class WarehouseSession:
                 reject("WAREHOUSE_SCHEMA", "Warehouse aggregate schema is unavailable; no rows fetched.")
             if tuple(c[0] for c in description) != spec.columns:
                 reject("WAREHOUSE_SCHEMA", "Unexpected aggregate columns; no rows fetched and raw fields withheld.")
-            rows = cursor.fetchmany(spec.max_rows + 1)
+            rows = cursor.fetchall()
             self._checkpoint()
             checked = _validate_rows(spec, rows)
             cursor.close()
@@ -534,12 +598,11 @@ class WarehouseSession:
             raise
         self._cursor = None
         return {
-            "operation": operation.value, "query_version": QUERY_VERSION, "query_checksum": spec.checksum,
+            "operation": operation.value, "query_checksum": spec.checksum,
             "result_checksum": hashlib.sha256(canonical_json(rows)).hexdigest(),
             "catalog": self.config.catalog, "endpoint_fingerprint": self.endpoint_fingerprint,
             "window": window.evidence(), "started_at": started_at,
-            "completed_at": datetime.now(timezone.utc).isoformat(), "source_cutoff": None,
-            "coverage_status": "unknown", "nonproduction": self.nonproduction,
+            "completed_at": datetime.now(timezone.utc).isoformat(), "nonproduction": self.nonproduction,
             "rows": rows, "row_count": len(rows), "omitted_row_count": 0,
         }
 

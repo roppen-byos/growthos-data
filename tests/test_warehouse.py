@@ -7,12 +7,14 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
+from types import SimpleNamespace
 from importlib.util import find_spec
 from threading import Event
 from unittest.mock import patch
 
 from growthos.errors import GrowthOSError
-from gwosdata.warehouse_cli import main
+from gwosdata.warehouse_cli import WarehouseExtractor, extraction_environment, fetch_data, main
+from gwosdata.postgres import local_setting
 from gwosdata.warehouse_client import (
     BIKE_SERVICES, MonthWindow, Operation, WarehouseConfig, WarehouseSession,
     _default_connection, operator_environment, query_for, read_operator_file, show_authorization_url,
@@ -47,8 +49,8 @@ class FakeCursor:
         columns = self.connection.columns.get(self.operation, spec.columns)
         self.description = [(name, None) for name in columns]
 
-    def fetchmany(self, size):
-        self.connection.fetches.append((self.operation, size))
+    def fetchall(self):
+        self.connection.fetches.append((self.operation, None))
         if (self.operation, self.window.value) in self.connection.month_rows:
             return self.connection.month_rows[(self.operation, self.window.value)]
         return self.connection.rows[self.operation]
@@ -70,6 +72,7 @@ class FakeConnection:
             Operation.INSTALLS_MONTHLY: [("delhi", "Delhi", 100), ("mystery_town", "Mystery Town", 20)],
             Operation.REGISTRATIONS_MONTHLY: [("delhi", "Delhi", 60), ("mystery_town", "Mystery Town", 10)],
             Operation.FTU_MONTHLY: [("delhi", "Delhi", 40, 20, 12, 6)],
+            Operation.FUNNEL_MONTHLY: [("delhi", "Delhi", 1000, 800, 700, 300, 250, 200, 180, 150, 140)],
         }
         self.month_rows = {}
         self.lookup = {
@@ -114,14 +117,22 @@ class WarehouseTests(unittest.TestCase):
 
     def test_monthly_queries_and_month_window_boundaries(self):
         self.assertEqual(self.window.day_parameters, ("20260901", "20261001"))
-        self.assertEqual(BIKE_SERVICES, ("link", "bike lite", "bike pink", "bike metro", "scooty", "scooty lite", "bike rated by women"))
+        self.assertEqual(BIKE_SERVICES, ("link",))
         with self.assertRaises(GrowthOSError):
             MonthWindow("9999-01")
         installs = query_for(Operation.INSTALLS_MONTHLY, self.window)
         self.assertIn("WHEN 'guntur' THEN 'vijayawada'", installs.sql)
         ftu = query_for(Operation.FTU_MONTHLY, self.window)
-        self.assertIn("'scooty lite'", ftu.sql)
+        self.assertIn("service_key = 'link'", ftu.sql)
+        self.assertNotIn("'bike lite'", ftu.sql)
         self.assertNotIn("customer_id", ftu.columns)
+        funnel = query_for(Operation.FUNNEL_MONTHLY, self.window)
+        self.assertIn("Bike Rated by Women", funnel.sql)
+        self.assertIn("Bike Rated by Women", funnel.sql.split("AS bike_net")[0])
+        self.assertEqual(funnel.columns, (
+            "canonical_city_key", "sample_source_city", "fe_sessions", "rr", "net",
+            "bike_rr", "bike_net", "auto_rr", "auto_net", "cab_rr", "cab_net",
+        ))
 
     def test_dotenv_and_operator_environment_config(self):
         with tempfile.TemporaryDirectory(prefix="growthos-dotenv-", dir="/tmp/opencode") as directory:
@@ -163,8 +174,7 @@ class WarehouseTests(unittest.TestCase):
             timed.run(Operation.INSTALLS_MONTHLY, self.window)
         self.assertEqual(caught.exception.code, "WAREHOUSE_TIMEOUT")
 
-    def test_two_month_extractor_cli_and_candidate_analysis(self):
-        from gwosdata.warehouse_cli import load_candidate_file
+    def test_two_month_extractor_and_immediate_publication(self):
         from growthos.analysis import compare_overall
 
         w9, w10 = MonthWindow("2026-09"), MonthWindow("2026-10")
@@ -173,27 +183,75 @@ class WarehouseTests(unittest.TestCase):
         connection.month_rows[(Operation.REGISTRATIONS_MONTHLY, "2026-10")] = [("delhi", "Delhi", 90), ("mystery_town", "Mystery Town", 15)]
         connection.month_rows[(Operation.FTU_MONTHLY, "2026-10")] = [("delhi", "Delhi", 60, 30, 18, 9)]
 
-        with tempfile.TemporaryDirectory(prefix="growthos-candidate-", dir="/tmp/opencode") as directory:
-            staged = Path(directory) / "sep-oct-2026.json"
-            plan_code, plan_out = self.invoke(["--month", "2026-09", "--end-month", "2026-10", "--extract-candidate", str(staged)])
-            self.assertEqual(plan_code, 0)
-            self.assertFalse(plan_out["network_attempted"])
-            self.assertEqual(len(plan_out["queries"]), 6)
+        plan_code, plan_out = self.invoke(["--month", "2026-09", "--end-month", "2026-10"])
+        self.assertEqual(plan_code, 0)
+        self.assertFalse(plan_out["network_attempted"])
+        self.assertEqual(len(plan_out["queries"]), 8)
+        with WarehouseSession(self.config, connection_factory=lambda *_: connection) as session:
+            dataset = WarehouseExtractor(session).extract(["2026-09", "2026-10"])
+        self.assertEqual(len(dataset.data["facts"]), 4)
+        self.assertEqual(compare_overall(dataset)["rows"][0]["volumes"]["installs"]["latest"]["value"], 180)
+        self.assertNotIn("coverage", dataset.data)
+        self.assertNotIn("cutoff", dataset.data["month_metadata"][0]["source_reads"][0])
+        with patch("gwosdata.warehouse_cli.sys.stdin.isatty", return_value=True), patch("gwosdata.warehouse_cli.sys.stderr.isatty", return_value=True), patch("gwosdata.warehouse_cli.fetch_data", return_value=dataset), patch("gwosdata.warehouse_cli.connect_writer") as writer:
+            writer.return_value.__enter__.return_value.replace_months.return_value = dataset
+            code, output = self.invoke(["--month", "2026-09", "--end-month", "2026-10", "--authorize-live"])
+        self.assertEqual(code, 0)
+        self.assertTrue(output["published"])
+        self.assertEqual(output["replaced_months"], ["2026-09", "2026-10"])
+        writer.return_value.__enter__.return_value.replace_months.assert_called_once_with(dataset)
 
-            def fake_session(selected, **kwargs):
-                return WarehouseSession(selected, connection_factory=lambda *_: connection)
+    def test_fetch_failure_never_opens_writer_and_child_environment_is_clean(self):
+        env = extraction_environment({"HOME": "/tmp/opencode", "PATH": "/usr/bin",
+            "GROWTHOS_WRITER_DSN": "secret", "GROWTHOS_READER_DSN": "secret",
+            "GROWTHOS_OWNER_DSN": "secret", "NEON_API_KEY": "secret", "GROWTHOS_TRINO_HOST": "host.invalid"})
+        self.assertEqual(set(env), {"HOME", "PATH", "GROWTHOS_TRINO_HOST"})
+        with patch("gwosdata.warehouse_cli.sys.stdin.isatty", return_value=True), patch("gwosdata.warehouse_cli.sys.stderr.isatty", return_value=True), patch("gwosdata.warehouse_cli.fetch_data", side_effect=GrowthOSError("WAREHOUSE_QUERY", "sanitized")), patch("gwosdata.warehouse_cli.connect_writer") as writer:
+            code, output = self.invoke(["--month", "2026-09", "--authorize-live"])
+        self.assertEqual(code, 2)
+        self.assertEqual(output["error"]["code"], "WAREHOUSE_QUERY")
+        writer.assert_not_called()
 
-            with patch("gwosdata.warehouse_cli.sys.stdin.isatty", return_value=True), patch("gwosdata.warehouse_cli.sys.stderr.isatty", return_value=True), patch("gwosdata.warehouse_cli.operator_environment", return_value=self.config), patch("gwosdata.warehouse_cli.WarehouseSession", side_effect=fake_session):
-                code, output = self.invoke(["--month", "2026-09", "--end-month", "2026-10", "--extract-candidate", str(staged), "--authorize-live"])
-            self.assertEqual(code, 0)
-            self.assertEqual(output["covered_months"], ["2026-09", "2026-10"])
-            self.assertEqual(output["fact_count"], 4)
-            self.assertEqual(output["known_subtotal_comparison"]["volumes"]["platform_ftu"]["absolute_delta"], 20)
+    def test_empty_required_source_rejects_the_entire_range(self):
+        self.connection.rows[Operation.FTU_MONTHLY] = []
+        with self.assertRaises(GrowthOSError) as caught:
+            WarehouseExtractor(self.session).extract(["2026-09"])
+        self.assertEqual(caught.exception.code, "COVERAGE")
 
-            snapshot = load_candidate_file(staged, publishable=True)
-            compare_out = compare_overall(snapshot)
-            self.assertEqual(compare_out["snapshot_id"], "candidate-2026-09-2026-10")
-            self.assertEqual(compare_out["rows"][0]["volumes"]["installs"]["latest"]["value"], 180)
+    def test_private_aggregate_pipe_is_bounded_and_sanitizes_failures(self):
+        from fixtures import demo_payload
+        from growthos.contracts import validate_data
+        raw = demo_payload()
+        with patch("gwosdata.warehouse_cli.subprocess.run", return_value=SimpleNamespace(returncode=0, stdout=json.dumps(raw).encode())) as run:
+            self.assertEqual(fetch_data(raw["months"]), validate_data(raw))
+            settings = run.call_args.kwargs
+            self.assertNotIn("GROWTHOS_WRITER_DSN", settings["env"])
+            self.assertNotIn("stderr", settings)  # OAuth remains on the operator terminal.
+            self.assertNotIn("stdin", settings)
+        with patch("gwosdata.warehouse_cli.subprocess.run", return_value=SimpleNamespace(returncode=2, stdout=b'{"error":{"code":"private-secret","message":"secret"}}')):
+            with self.assertRaises(GrowthOSError) as caught:
+                fetch_data(raw["months"])
+            self.assertNotIn("secret", str(caught.exception))
+        with patch("gwosdata.warehouse_cli.subprocess.run", return_value=SimpleNamespace(returncode=0, stdout=json.dumps(raw).encode())), patch("gwosdata.warehouse_cli.MAX_TRANSFER_BYTES", 1):
+            with self.assertRaises(GrowthOSError):
+                fetch_data(raw["months"])
+        with patch("gwosdata.warehouse_cli.subprocess.run", return_value=SimpleNamespace(returncode=0, stdout=json.dumps(raw).encode())):
+            with self.assertRaises(GrowthOSError):
+                fetch_data(["2026-09"])
+
+    def test_writer_setting_loader_selects_one_literal_without_environment_mutation(self):
+        with tempfile.TemporaryDirectory(dir="/tmp/opencode") as directory, patch.dict(os.environ, {}, clear=True):
+            path = Path(directory) / '.env'
+            path.write_text("GROWTHOS_TRINO_HOST=host.invalid\nGROWTHOS_WRITER_DSN='literal-value'\n")
+            self.assertEqual(local_setting("GROWTHOS_WRITER_DSN", path), "literal-value")
+            self.assertNotIn("GROWTHOS_WRITER_DSN", os.environ)
+            path.write_text("GROWTHOS_WRITER_DSN=one\nGROWTHOS_WRITER_DSN=two\n")
+            with self.assertRaises(GrowthOSError):
+                local_setting("GROWTHOS_WRITER_DSN", path)
+            path.unlink()
+            path.symlink_to(Path(directory) / 'not-read')
+            with self.assertRaises(GrowthOSError):
+                local_setting("GROWTHOS_WRITER_DSN", path)
 
     @unittest.skipUnless(find_spec("trino") is not None, "Optional pinned Trino dependency not installed")
     def test_pinned_trino_client_construction(self):
