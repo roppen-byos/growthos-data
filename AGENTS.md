@@ -1,7 +1,5 @@
 # GrowthOS Data Pipeline Guide (operator-only)
 
-Workspace governance remains in `../../AGENTS.md`; before significant development read `../../docs/worklog.md`; before design read `../../ARCHITECTURE.md` and `../../docs/adr/`; before business changes read `../../docs/business-rules.md`. Approved scope: `../../docs/specs/v1-spec.md`.
-
 This repo is the only writer. It extracts reviewed monthly aggregates (core IRF and funnel metrics) from the company warehouse and atomically replaces requested months in Neon. Analysts run the separate `gwos-analyst` repo and never run this code.
 
 ## Fast Command Router
@@ -18,6 +16,7 @@ Run from `gwos-data/` using `.venv/bin/python` (or `../.venv/bin/python` when us
 | One-time owner target migration from legacy `irf.pftu_targets` to `irf.targets` (explicit approval required) | `.venv/bin/python -m gwosdata.migrate_targets --authorize-migration` |
 | Owner-only migration from legacy snapshot schema (explicit approval required) | `.venv/bin/python -m gwosdata.migrate_monthly --authorize-migration` |
 | Owner-only T4-to-T3 migration of current monthly data (explicit approval required) | `.venv/bin/python -m gwosdata.migrate_tiers --authorize-migration` |
+| Owner-only one-time merge of stored `unrecognized_city` rows into `city_not_found` (explicit approval required) | `.venv/bin/python -m gwosdata.migrate_city_sentinel --authorize-migration` |
 | Owner-only removal of legacy version provenance (explicit approval required) | `.venv/bin/python -m gwosdata.migrate_versions --authorize-migration` |
 
 ## Safety Boundaries

@@ -128,6 +128,30 @@ transaction using the same protected owner settings. Existing rows remain
 unchanged with `NULL` funnel values until those months are refreshed, and
 historical IRF fact checksums are preserved.
 
+### Merge stored `unrecognized_city` rows into `city_not_found`
+
+Future warehouse extractions canonicalise the source registrations sentinel
+`UNRECOGNIZED_CITY` to `city_not_found` so unattributed installs and
+registrations share one bucket. For already-published months that still carry
+separate `unrecognized_city` and `city_not_found` rows, run the one-time
+owner-only migration after explicit approval (no warehouse fetch occurs):
+
+```bash
+.venv/bin/python -m gwosdata.migrate_city_sentinel --authorize-migration
+```
+
+This uses the same protected owner/writer/reader settings and endpoint checks
+as the other owner migrations and accepts either the base reporting tables
+(`irf.facts`, `irf.month_metadata`) or the reporting tables with installed
+targets (`irf.targets`, `irf.target_imports`). Inside one transaction it
+verifies every stored month's checksum and count, folds each month's
+`unrecognized_city` row into `city_not_found` (summing any metric present on
+both rows and keeping null metrics unavailable), recomputes that month's
+`fact_count` and `result_checksum`, and re-reads the month through the
+read-only store. Month metadata, source-read timestamps, and unaffected months
+are unchanged; repeating it is a data no-op, and any schema, checksum, or
+verification failure rolls back the entire transaction.
+
 ### Target storage and import
 
 Both approved projection CSVs are stored together in `irf.targets`: one row per

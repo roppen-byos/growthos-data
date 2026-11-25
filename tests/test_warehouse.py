@@ -122,6 +122,10 @@ class WarehouseTests(unittest.TestCase):
             MonthWindow("9999-01")
         installs = query_for(Operation.INSTALLS_MONTHLY, self.window)
         self.assertIn("WHEN 'guntur' THEN 'vijayawada'", installs.sql)
+        for operation in (Operation.INSTALLS_MONTHLY, Operation.REGISTRATIONS_MONTHLY,
+                          Operation.FTU_MONTHLY, Operation.FUNNEL_MONTHLY):
+            self.assertIn("WHEN 'unrecognized_city' THEN 'city_not_found'",
+                          query_for(operation, self.window).sql)
         ftu = query_for(Operation.FTU_MONTHLY, self.window)
         self.assertIn("service_key = 'link'", ftu.sql)
         self.assertNotIn("'bike lite'", ftu.sql)

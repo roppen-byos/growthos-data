@@ -20,6 +20,7 @@ from typing import Callable
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
+from growthos.classification import UNATTRIBUTED_CITY_KEY, UNATTRIBUTED_SOURCE_KEYS
 from growthos.contracts import BUSINESS_TIMEZONE, canonical_json, month, next_month
 from growthos.errors import GrowthOSError, reject
 
@@ -44,9 +45,14 @@ _FILE_KEYS.update({name.removeprefix("GROWTHOS_"): name for name in _CANONICAL_S
 
 
 def _canonical_city_sql(column: str) -> str:
-    slug = f"coalesce(nullif(trim(BOTH '_' FROM regexp_replace(lower(trim({column})), '[^a-z0-9]+', '_')), ''), 'city_not_found')"
+    slug = f"coalesce(nullif(trim(BOTH '_' FROM regexp_replace(lower(trim({column})), '[^a-z0-9]+', '_')), ''), '{UNATTRIBUTED_CITY_KEY}')"
+    unattributed_whens = "".join(
+        f"WHEN '{source}' THEN '{UNATTRIBUTED_CITY_KEY}' "
+        for source in sorted(UNATTRIBUTED_SOURCE_KEYS - {UNATTRIBUTED_CITY_KEY})
+    )
     return (
         f"CASE {slug} "
+        f"{unattributed_whens}"
         "WHEN 'guntur' THEN 'vijayawada' "
         "WHEN 'faridabad' THEN 'delhi' "
         "WHEN 'attingal' THEN 'trivandrum' "
@@ -112,7 +118,7 @@ ALL_OPERATIONS = EXTRACTION_OPERATIONS + FUNNEL_OPERATIONS
 _INSTALLS_MONTHLY = f"""
 WITH mapped AS (
     SELECT {_canonical_city_sql("m.city")} AS canonical_city_key,
-           coalesce(nullif(trim(m.city), ''), 'city_not_found') AS source_city,
+           coalesce(nullif(trim(m.city), ''), '{UNATTRIBUTED_CITY_KEY}') AS source_city,
            i.appsflyer_id
     FROM appsflyer.canonical_appsflyer_customer_install i
     LEFT JOIN marketing.media_source_channel_mapping c
@@ -134,7 +140,7 @@ ORDER BY canonical_city_key
 _REGISTRATIONS_MONTHLY = f"""
 WITH registrations_ranked AS (
     SELECT {_canonical_city_sql("city")} AS canonical_city_key,
-           coalesce(nullif(trim(city), ''), 'city_not_found') AS source_city,
+           coalesce(nullif(trim(city), ''), '{UNATTRIBUTED_CITY_KEY}') AS source_city,
            substr(mobile, -10, 10) AS last10,
            row_number() OVER (
                PARTITION BY substr(mobile, -10, 10) ORDER BY yyyymmdd ASC
@@ -155,7 +161,7 @@ ORDER BY canonical_city_key
 _FTU_MONTHLY = f"""
 WITH mapped AS (
     SELECT {_canonical_city_sql("city_name")} AS canonical_city_key,
-           coalesce(nullif(trim(city_name), ''), 'city_not_found') AS source_city,
+           coalesce(nullif(trim(city_name), ''), '{UNATTRIBUTED_CITY_KEY}') AS source_city,
            customer_id,
            lower(trim(service_category)) AS service_key,
            platform_level_new_order_flag
@@ -204,7 +210,7 @@ WITH date_bounds AS (
     GROUP BY customer_id
 ), city_month AS (
     SELECT {_canonical_city_sql("city")} AS canonical_city_key,
-           coalesce(nullif(trim(city), ''), 'city_not_found') AS source_city,
+           coalesce(nullif(trim(city), ''), '{UNATTRIBUTED_CITY_KEY}') AS source_city,
            CAST(coalesce(sum(fe), 0) AS bigint) AS fe_sessions,
            CAST(coalesce(sum(rr), 0) AS bigint) AS rr,
            CAST(coalesce(sum(net), 0) AS bigint) AS net,
