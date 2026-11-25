@@ -20,9 +20,9 @@ from typing import Callable
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
-from growthos.classification import UNATTRIBUTED_CITY_KEY, UNATTRIBUTED_SOURCE_KEYS
-from growthos.contracts import BUSINESS_TIMEZONE, canonical_json, month, next_month
-from growthos.errors import GrowthOSError, reject
+from .classification import UNATTRIBUTED_CITY_KEY, UNATTRIBUTED_SOURCE_KEYS
+from .contracts import BUSINESS_TIMEZONE, canonical_json, month, next_month
+from .errors import GrowthOSError, reject
 
 PINNED_TRINO = "0.336.0"
 BIKE_SERVICES = ("link",)

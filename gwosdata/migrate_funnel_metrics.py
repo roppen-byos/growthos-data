@@ -1,7 +1,7 @@
 """Owner-only additive migration: add funnel metric columns to irf.facts."""
 
-from growthos.contracts import funnel_metrics_sql
-from growthos.errors import SafeParser, execute_cli, reject
+from .contracts import funnel_metrics_sql
+from .errors import SafeParser, execute_cli, reject
 
 from .migrate_monthly import run
 

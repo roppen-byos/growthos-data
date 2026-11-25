@@ -2,9 +2,9 @@
 
 from pathlib import Path
 
-from growthos.contracts import CORE_FACT_FIELDS, FUNNEL_VOLUMES, checksum, reporting_schema_sql, validate_data
-from growthos.errors import SafeParser, execute_cli, reject
-from growthos.postgres import PostgresStore, validate_reader_settings
+from .contracts import CORE_FACT_FIELDS, FUNNEL_VOLUMES, checksum, reporting_schema_sql, validate_data
+from .errors import SafeParser, execute_cli, reject
+from .postgres import PostgresStore, validate_reader_settings
 
 from .postgres import WriterStore, local_setting
 
@@ -74,9 +74,9 @@ def run(migration=migrate_connection):
     root = Path(__file__).resolve().parents[1]
     try:
         settings = {name: conninfo_to_dict(local_setting(key, path)) for name, key, path in (
-            ("owner", "GROWTHOS_OWNER_DSN", root / ".env.owner"),
+            ("owner", "GROWTHOS_OWNER_DSN", root / ".env"),
             ("writer", "GROWTHOS_WRITER_DSN", root / ".env"),
-            ("reader", "GROWTHOS_READER_DSN", root.parent / "gwos-analyst/.env"))}
+            ("reader", "GROWTHOS_READER_DSN", root / ".env"))}
     except Exception:
         reject("CONFIGURATION", "Migration requires protected local owner/writer/reader settings; details withheld.")
     for cfg in settings.values():

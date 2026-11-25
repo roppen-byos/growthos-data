@@ -3,7 +3,7 @@ import unittest
 from contextlib import redirect_stdout
 from unittest.mock import patch
 
-from growthos.errors import GrowthOSError
+from gwosdata.errors import GrowthOSError
 from gwosdata.migrate_funnel_metrics import main, migrate_connection
 
 

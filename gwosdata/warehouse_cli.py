@@ -10,9 +10,9 @@ import os
 import subprocess
 import sys
 
-from growthos.classification import resolve_city
-from growthos.contracts import BUSINESS_TIMEZONE, FUNNEL_VOLUMES, VOLUMES, month_range, validate_data
-from growthos.errors import MAX_OUTPUT_BYTES, SafeParser, execute_cli, reject
+from .classification import resolve_city
+from .contracts import BUSINESS_TIMEZONE, FUNNEL_VOLUMES, VOLUMES, month_range, validate_data
+from .errors import MAX_OUTPUT_BYTES, SafeParser, execute_cli, reject
 from .postgres import connect_writer
 from .warehouse_client import (
     BIKE_SERVICES, ALL_OPERATIONS, OPERATOR_ENV_FILE,

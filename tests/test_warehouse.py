@@ -12,7 +12,7 @@ from importlib.util import find_spec
 from threading import Event
 from unittest.mock import patch
 
-from growthos.errors import GrowthOSError
+from gwosdata.errors import GrowthOSError
 from gwosdata.warehouse_cli import WarehouseExtractor, extraction_environment, fetch_data, main
 from gwosdata.postgres import local_setting
 from gwosdata.warehouse_client import (
@@ -145,10 +145,13 @@ class WarehouseTests(unittest.TestCase):
     def test_dotenv_and_operator_environment_config(self):
         with tempfile.TemporaryDirectory(prefix="growthos-dotenv-", dir="/tmp/opencode") as directory:
             path = Path(directory) / ".env"
-            path.write_text('TRINO_HOST="file-warehouse.example.invalid"\nTRINO_USER=file-user\n')
+            path.write_text('TRINO_HOST="file-warehouse.example.invalid"\nTRINO_USER=file-user\n'
+                            'GROWTHOS_OWNER_DSN=private-owner\nGROWTHOS_WRITER_DSN=private-writer\n'
+                            'GROWTHOS_READER_DSN=private-reader\n')
             parsed = read_operator_file(path)
             self.assertEqual(parsed["GROWTHOS_TRINO_HOST"], "file-warehouse.example.invalid")
             self.assertEqual(parsed["GROWTHOS_TRINO_USER"], "file-user")
+            self.assertEqual(set(parsed), {"GROWTHOS_TRINO_HOST", "GROWTHOS_TRINO_USER"})
             with patch("gwosdata.warehouse_client.read_operator_file", wraps=read_operator_file):
                 cfg = operator_environment({}, env_file=path)
             self.assertEqual(cfg.host, "file-warehouse.example.invalid")
@@ -183,8 +186,6 @@ class WarehouseTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "WAREHOUSE_TIMEOUT")
 
     def test_two_month_extractor_and_immediate_publication(self):
-        from growthos.analysis import compare_overall
-
         w9, w10 = MonthWindow("2026-09"), MonthWindow("2026-10")
         connection = FakeConnection(w9, extra_windows=(w10,))
         connection.month_rows[(Operation.INSTALLS_MONTHLY, "2026-10")] = [("delhi", "Delhi", 150), ("mystery_town", "Mystery Town", 30)]
@@ -198,7 +199,7 @@ class WarehouseTests(unittest.TestCase):
         with WarehouseSession(self.config, connection_factory=lambda *_: connection) as session:
             dataset = WarehouseExtractor(session).extract(["2026-09", "2026-10"])
         self.assertEqual(len(dataset.data["facts"]), 4)
-        self.assertEqual(compare_overall(dataset)["rows"][0]["volumes"]["installs"]["latest"]["value"], 180)
+        self.assertEqual(sum(r["installs"] for r in dataset.data["facts"] if r["month"] == "2026-10"), 180)
         self.assertNotIn("coverage", dataset.data)
         self.assertNotIn("cutoff", dataset.data["month_metadata"][0]["source_reads"][0])
         with patch("gwosdata.warehouse_cli.sys.stdin.isatty", return_value=True), patch("gwosdata.warehouse_cli.sys.stderr.isatty", return_value=True), patch("gwosdata.warehouse_cli.fetch_data", return_value=dataset), patch("gwosdata.warehouse_cli.connect_writer") as writer:
@@ -228,7 +229,7 @@ class WarehouseTests(unittest.TestCase):
 
     def test_private_aggregate_pipe_is_bounded_and_sanitizes_failures(self):
         from fixtures import demo_payload
-        from growthos.contracts import validate_data
+        from gwosdata.contracts import validate_data
         raw = demo_payload()
         with patch("gwosdata.warehouse_cli.subprocess.run", return_value=SimpleNamespace(returncode=0, stdout=json.dumps(raw).encode())) as run:
             self.assertEqual(fetch_data(raw["months"]), validate_data(raw))

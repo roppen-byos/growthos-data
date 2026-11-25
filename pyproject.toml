@@ -7,7 +7,7 @@ name = "gwos-data"
 version = "0.1.0"
 description = "GrowthOS data pipeline: operator-only warehouse extraction and Neon publication"
 requires-python = ">=3.11"
-dependencies = ["growthos-irf"]
+dependencies = []
 
 [project.optional-dependencies]
 postgres = ["psycopg[binary]>=3.2,<4"]
@@ -18,3 +18,6 @@ gwos-warehouse = "gwosdata.warehouse_cli:main"
 
 [tool.setuptools.packages.find]
 include = ["gwosdata*"]
+
+[tool.setuptools.package-data]
+gwosdata = ["sql/*.sql"]

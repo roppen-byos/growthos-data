@@ -1,27 +1,32 @@
 # GrowthOS Data Pipeline (operator-only)
 
-One human operator fetches monthly warehouse aggregates and replaces those months
-in Neon. Analysts use the separate read-only `gwos-analyst` repository.
+Authorized teammates fetch monthly warehouse aggregates and replace those months
+in the shared Neon database. Coordinate so only one refresh runs at a time.
+This repository is self-contained: no analyst checkout, package, or credentials
+file from another repository is required.
 
 ## Setup
 
+Use Python 3.11 or newer. Clone this repository and run from its root:
+
 ```bash
 python3 -m venv .venv
-.venv/bin/python -m pip install -e ../gwos-analyst
 .venv/bin/python -m pip install -e '.[warehouse,postgres]'
 ```
 
-Configure `gwos-data/.env` locally (never paste credentials into chat):
+Create a private `.env` using `.env.example` as the template; preserve any existing
+settings. Obtain authorized connection details through your company's approved
+credential-sharing channel, not Git or chat. Configure:
 
 - `GROWTHOS_TRINO_HOST`, `GROWTHOS_TRINO_USER`, `GROWTHOS_TRINO_CATALOG=hive`,
   `GROWTHOS_TRINO_PORT=443`. Four `TRINO_*` file aliases are also supported.
 - `GROWTHOS_WRITER_DSN`: dedicated writer connection with `sslmode=verify-full`
-  and a trusted CA root. Reader credentials belong only in `gwos-analyst`.
-- Store actual credential files privately (`0600`); `.env*` is Git-ignored except
-  the blank `.env.example`. Warehouse OAuth tokens remain memory-only.
+  and a trusted CA root.
+- Store `.env` privately (`0600`); `.env*` is Git-ignored except
+  the blank `.env.example` template. Warehouse OAuth
+  tokens remain memory-only; each teammate completes their own browser approval.
 
-The workspace's existing shared environment is `../.venv`; use its Python instead
-of `.venv/bin/python` if installed there. Do not source the entire operator `.env`:
+Do not source the entire operator `.env`:
 the command selects settings directly and isolates the warehouse child environment.
 
 ## Fetch and publish
@@ -53,6 +58,9 @@ A lost database commit acknowledgement can be uncertain: inspect current data
 before rerunning. Only one operator refresh may run at a time; concurrency is not
 coordinated. A technical validation success does not certify source completeness.
 
+Routine refreshes of an already-configured database need only `.env`. They do not
+need owner or reader settings, and do not run migrations or target imports.
+
 ## Database schema and migration
 
 Monthly actuals use `irf.facts` (month/city key) and `irf.month_metadata`. The writer needs
@@ -60,22 +68,38 @@ Monthly actuals use `irf.facts` (month/city key) and `irf.month_metadata`. The w
 `SELECT`; neither runtime role owns the schema or has DDL privileges.
 
 For a new approved empty database, the schema owner applies
-`../gwos-analyst/growthos/sql/001_reporting.sql` and grants the two runtime roles. To migrate
+`gwosdata/sql/001_reporting.sql` and grants the two runtime roles. To migrate
 the old snapshot schema, after explicit destructive-migration authorization:
 
 ```bash
 .venv/bin/python -m gwosdata.migrate_monthly --authorize-migration
 ```
 
-This reads the owner DSN from protected `.env.owner` or `GROWTHOS_OWNER_DSN`, checks
+This reads the owner DSN from protected `.env` or `GROWTHOS_OWNER_DSN`, checks
 the active data's count/checksum, copies it to current months, rechecks the result,
 updates grants and removes the specifically identified legacy tables/functions in
 one transaction. Unknown/already-migrated states are rejected; no `CASCADE` is used.
 Old inactive revisions are discarded. Routine refresh never runs migrations.
 
+All owner commands use the same local `.env` (environment variables override
+the file). Use `.env.example` as a template without
+overwriting existing settings:
+
+| Setting | Local file | Purpose |
+| --- | --- | --- |
+| `GROWTHOS_OWNER_DSN` | `.env` | Connection used for the explicitly authorized owner operation |
+| `GROWTHOS_READER_DSN` | `.env` | Identifies the reader login for grants and endpoint checks; no reader connection is opened |
+| `GROWTHOS_WRITER_DSN` | `.env` | Identifies the writer login for grants and endpoint checks |
+
+Use distinct owner/writer/reader users on the same host, port, and database, all
+with `sslmode=verify-full`. Keep `.env` private (`0600`) and out of Git.
+Owner and reader settings are optional for routine warehouse refreshes. Warehouse
+configuration selects only Trino settings from this file, and the extraction child
+environment excludes database credentials.
+
 ### Fold existing T4 cities into T3
 
-DEC-013 replaces the T4 policy: future extraction assigns unmapped cities to T3.
+Future extraction assigns named unmapped cities to T3 instead of the retired T4.
 For an existing **current monthly** database, after explicit owner-migration approval:
 
 ```bash
@@ -94,7 +118,7 @@ Historical local reports/exports are not rewritten.
 
 ### Remove legacy version provenance
 
-Contract versioning was removed from `growthos/contracts.py` and `growthos/classification.py`, so stored
+The current storage contract has no version fields, so stored
 metadata that still carries `definition_version`, `mapping_version`, `reference_version`, or
 `source_reads[*].query_version` no longer validates. For an existing **current monthly** database,
 after explicit owner-migration approval:
@@ -113,7 +137,7 @@ updated analyst; reader commands do not perform migrations.
 
 ### Add funnel metric columns
 
-DEC-029 stores nine additive monthly FTU-eligible funnel columns (`fe_sessions`,
+The reporting schema stores nine additive monthly FTU-eligible funnel columns (`fe_sessions`,
 `rr`, `net`, `bike_rr`, `bike_net`, `auto_rr`, `auto_net`, `cab_rr`, `cab_net`)
 in `irf.facts`. For an existing database created before these columns existed,
 run the owner-only additive migration after explicit approval (and before running
@@ -123,34 +147,10 @@ a live warehouse refresh that writes funnel columns):
 .venv/bin/python -m gwosdata.migrate_funnel_metrics --authorize-migration
 ```
 
-This applies `../gwos-analyst/growthos/sql/003_funnel_metrics.sql` inside one
+This applies the packaged `gwosdata/sql/003_funnel_metrics.sql` inside one
 transaction using the same protected owner settings. Existing rows remain
 unchanged with `NULL` funnel values until those months are refreshed, and
 historical IRF fact checksums are preserved.
-
-### Merge stored `unrecognized_city` rows into `city_not_found`
-
-Future warehouse extractions canonicalise the source registrations sentinel
-`UNRECOGNIZED_CITY` to `city_not_found` so unattributed installs and
-registrations share one bucket. For already-published months that still carry
-separate `unrecognized_city` and `city_not_found` rows, run the one-time
-owner-only migration after explicit approval (no warehouse fetch occurs):
-
-```bash
-.venv/bin/python -m gwosdata.migrate_city_sentinel --authorize-migration
-```
-
-This uses the same protected owner/writer/reader settings and endpoint checks
-as the other owner migrations and accepts either the base reporting tables
-(`irf.facts`, `irf.month_metadata`) or the reporting tables with installed
-targets (`irf.targets`, `irf.target_imports`). Inside one transaction it
-verifies every stored month's checksum and count, folds each month's
-`unrecognized_city` row into `city_not_found` (summing any metric present on
-both rows and keeping null metrics unavailable), recomputes that month's
-`fact_count` and `result_checksum`, and re-reads the month through the
-read-only store. Month metadata, source-read timestamps, and unaffected months
-are unchanged; repeating it is a data no-op, and any schema, checksum, or
-verification failure rolls back the entire transaction.
 
 ### Target storage and import
 
@@ -161,10 +161,9 @@ an unimported metric is never mistaken for a blank target. No source checksum,
 import timestamp, row count or original target components are stored; each import
 validates fully inside its transaction and keeps no post-hoc evidence.
 
-Sources (read-only workspace input, not bundled with the analyst):
-
-- `../../data/Re-Evaluating Projection - City Level Update FTU Targets.csv`
-- `../../data/Re-Evaluating Projection - City Level Update Reg Targets.csv`
+Obtain the approved Platform FTU and Registration projection CSVs separately.
+They are not bundled with this repository. The examples below use local paths
+`data/ftu_targets.csv` and `data/registration_targets.csv`; `data/` is Git-ignored.
 
 If a legacy `irf.pftu_targets` table still exists, migrate it first (owner-only,
 explicit approval required). The migration copies it into `irf.targets`, labels
@@ -180,12 +179,12 @@ Then import each metric separately:
 
 ```bash
 # Offline validation only: no settings or database access
-.venv/bin/python -m gwosdata.import_targets --csv '../../data/Re-Evaluating Projection - City Level Update FTU Targets.csv' --metric platform_ftu --check-only
-.venv/bin/python -m gwosdata.import_targets --csv '../../data/Re-Evaluating Projection - City Level Update Reg Targets.csv' --metric registrations --check-only
+.venv/bin/python -m gwosdata.import_targets --csv data/ftu_targets.csv --metric platform_ftu --check-only
+.venv/bin/python -m gwosdata.import_targets --csv data/registration_targets.csv --metric registrations --check-only
 
 # Only after separate approval to create/import the live tables
-.venv/bin/python -m gwosdata.import_targets --csv '../../data/Re-Evaluating Projection - City Level Update FTU Targets.csv' --metric platform_ftu --authorize-import
-.venv/bin/python -m gwosdata.import_targets --csv '../../data/Re-Evaluating Projection - City Level Update Reg Targets.csv' --metric registrations --authorize-import
+.venv/bin/python -m gwosdata.import_targets --csv data/ftu_targets.csv --metric platform_ftu --authorize-import
+.venv/bin/python -m gwosdata.import_targets --csv data/registration_targets.csv --metric registrations --authorize-import
 ```
 
 The CSV is validated before protected owner settings are read. The import uses the
@@ -228,3 +227,15 @@ The second command creates and removes an owned loopback-only disposable Postgre
 container. Never point the integration tests at Neon. Tests cover month replacement,
 stale-city removal, untouched metadata, multi-month rollback, permissions, consistent
 reads, migration preservation/corruption rejection, and the guarded warehouse CLI.
+The offline suite checks local schemas, historic checksums, reviewed warehouse SQL,
+owner-setting locations, and operation without other checkouts or site packages.
+
+## Known limitations
+
+These previously reviewed correctness issues are separate from standalone setup:
+
+- Registration records tied on earliest date across different cities are currently
+  selected arbitrarily rather than rejected. The SQL has not changed in this task.
+- Legacy tier/version migrations currently expect funnel columns even on older
+  databases. Have a maintainer review a legacy upgrade before running it; do not
+  bypass schema guards or change migration order to work around the failure.

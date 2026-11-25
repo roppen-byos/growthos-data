@@ -1,6 +1,6 @@
 """Synthetic aggregate observations; tests only, never a live-source fallback."""
 
-from growthos.contracts import FUNNEL_VOLUMES, VOLUMES, MonthlyData, validate_data
+from gwosdata.contracts import FUNNEL_VOLUMES, VOLUMES, MonthlyData, validate_data
 
 
 def demo_payload() -> dict:

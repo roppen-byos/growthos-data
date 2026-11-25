@@ -1,8 +1,8 @@
 """Explicit owner-only removal of legacy version provenance from stored month metadata."""
 
-from growthos.contracts import FACT_FIELDS, MAX_FACTS, checksum, validate_data
-from growthos.errors import SafeParser, execute_cli, reject
-from growthos.postgres import PostgresStore
+from .contracts import FACT_FIELDS, MAX_FACTS, checksum, validate_data
+from .errors import SafeParser, execute_cli, reject
+from .postgres import PostgresStore
 
 from .migrate_monthly import run
 

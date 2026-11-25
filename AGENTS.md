@@ -1,10 +1,10 @@
 # GrowthOS Data Pipeline Guide (operator-only)
 
-This repo is the only writer. It extracts reviewed monthly aggregates (core IRF and funnel metrics) from the company warehouse and atomically replaces requested months in Neon. Analysts run the separate `gwos-analyst` repo and never run this code.
+This standalone repo extracts reviewed monthly aggregates (core IRF and funnel metrics) from the company warehouse and atomically replaces requested months in Neon. Authorized teammates use the existing operator commands; coordinate so only one refresh runs at a time. Installation, tests, schemas, and settings require only this checkout.
 
 ## Fast Command Router
 
-Run from `gwos-data/` using `.venv/bin/python` (or `../.venv/bin/python` when using the workspace's shared venv). Install the consumer package first with `pip install -e ../gwos-analyst`, then `pip install -e '.[warehouse,postgres]'`.
+Run from this repository root using `.venv/bin/python`. Follow [Setup](README.md#setup) to create the environment and install `.[warehouse,postgres]`.
 
 | Task | Command |
 | --- | --- |
@@ -16,7 +16,6 @@ Run from `gwos-data/` using `.venv/bin/python` (or `../.venv/bin/python` when us
 | One-time owner target migration from legacy `irf.pftu_targets` to `irf.targets` (explicit approval required) | `.venv/bin/python -m gwosdata.migrate_targets --authorize-migration` |
 | Owner-only migration from legacy snapshot schema (explicit approval required) | `.venv/bin/python -m gwosdata.migrate_monthly --authorize-migration` |
 | Owner-only T4-to-T3 migration of current monthly data (explicit approval required) | `.venv/bin/python -m gwosdata.migrate_tiers --authorize-migration` |
-| Owner-only one-time merge of stored `unrecognized_city` rows into `city_not_found` (explicit approval required) | `.venv/bin/python -m gwosdata.migrate_city_sentinel --authorize-migration` |
 | Owner-only removal of legacy version provenance (explicit approval required) | `.venv/bin/python -m gwosdata.migrate_versions --authorize-migration` |
 
 ## Safety Boundaries
@@ -25,7 +24,7 @@ Run from `gwos-data/` using `.venv/bin/python` (or `../.venv/bin/python` when us
 - **Secret isolation:** The parent reads `GROWTHOS_WRITER_DSN` from the environment or `gwos-data/.env` after the clean warehouse child exits. Keep database/provider secrets out of that child and all operator secrets out of the analyst environment.
 - **Atomic replacement:** `warehouse_cli` extracts all four required monthly sources (`installs`, `registrations`, `ftu`, `funnel`) across the full requested range into memory before writing. In one transaction, it deletes and replaces all requested months (including removing stale cities) while leaving untouched months and their metadata intact. No JSON staging, historical versions, locks, run tracking, retries, or resume — restart failed requests from scratch. On older databases, apply `migrate_funnel_metrics` before refreshing months.
 - **Availability & provenance:** Store source-read timestamps without completeness/acceptance labels or version identifiers. A successful fetch and technical validation makes ended months immediately reportable. Definition changes apply to refreshed months only and do not trigger rejection or recalculation of untouched months.
-- **Owner migrations & target imports:** All owner migrations and target imports read `.env.owner` (or `GROWTHOS_OWNER_DSN`) only after explicit user authorization. Target installation is separate from warehouse refresh; follow [Target storage and import](README.md#target-storage-and-import) for validation, reader grants, no-overwrite reruns, and the one-time September/October merged-city review (returned for `--metric platform_ftu` imports only). Finish legacy tier/version migrations (`migrate_tiers`, `migrate_versions`) before installing targets or funnel columns, as their exact schema guards intentionally reject expanded tables.
+- **Owner migrations & target imports:** Only after explicit user authorization, owner commands load `GROWTHOS_OWNER_DSN`, `GROWTHOS_READER_DSN`, and `GROWTHOS_WRITER_DSN` from the same local `.env` (or the environment). Existing distinct-login, endpoint, and TLS checks remain required; only the owner connects. Target installation is separate from warehouse refresh; follow [Target storage and import](README.md#target-storage-and-import) for validation, reader grants, no-overwrite reruns, and the one-time September/October merged-city review (returned for `--metric platform_ftu` imports only). Before legacy upgrades, read [Known limitations](README.md#known-limitations); tier/version migrations must precede target/funnel installation, but pre-funnel compatibility is an unresolved issue.
 
 ## Verification
 
@@ -39,4 +38,4 @@ Never run integration tests against Neon. Run offline tests and disposable-Postg
 .venv/bin/python scripts/test_postgres_local.py
 ```
 
-If you modify any of the three core IRF extraction queries (`installs-monthly`, `registrations-monthly`, `ftu-monthly`) in `gwosdata/warehouse_client.py`, update `../gwos-analyst/growthos/sql/warehouse_queries.sql` to match; `tests/test_query_parity.py` fails closed on SQL or checksum drift.
+Warehouse SQL edits require reviewing the pinned checksums in `tests/test_query_parity.py`. Storage contracts, city mapping, schemas, and verification reads live in `gwosdata/`; preserve existing database compatibility and checksum scope. Run the offline suite after edits to these modules. Standalone packaging checks are in `tests/test_packaging.py`.

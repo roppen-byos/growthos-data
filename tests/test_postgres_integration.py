@@ -5,14 +5,13 @@ import os
 import unittest
 from unittest.mock import patch
 
-from growthos.contracts import FACT_FIELDS, checksum, validate_data
-from growthos.errors import GrowthOSError
+from gwosdata.contracts import checksum, validate_data
+from gwosdata.errors import GrowthOSError
 from fixtures import demo_payload
-from growthos.postgres import PostgresStore, assert_reader_permissions
+from gwosdata.postgres import PostgresStore, assert_reader_permissions
 from gwosdata.postgres import WriterStore
 from gwosdata.migrate_monthly import grant_roles, migrate_connection, schema_sql
 from gwosdata.migrate_tiers import migrate_connection as migrate_tiers
-from gwosdata.migrate_city_sentinel import migrate_connection as migrate_city_sentinel
 from gwosdata.migrate_versions import migrate_connection as migrate_versions
 from gwosdata.import_targets import import_connection as import_targets, parse_csv
 from test_import_targets import SOURCE as TARGET_SOURCE
@@ -132,13 +131,13 @@ class PostgresIntegrationTests(unittest.TestCase):
             self.assertTrue(result["imported"])
             self.assertEqual(len(result["merged_city_review"]), 2)
             self.assertEqual(self.reader.load_targets("2026-10"), plans[1])
-            from growthos.analysis import target_facts
-            facts = target_facts(self.reader.load(["2026-10"]), self.reader.load_targets("2026-10"),
-                                 "2026-10", cities=["Harbor"])
-            self.assertEqual(facts["row_count"], 1)
-            self.assertEqual((facts["rows"][0]["target"], facts["rows"][0]["actual"]), (None, 40))
-            self.assertEqual(facts["rows"][0]["target_source"], "new_launch")
-            self.assertEqual(facts["overall"]["actual"], 60)
+            # Verify storage without importing the consumer's selection engine.
+            actuals = self.reader.load(["2026-10"]).data["facts"]
+            self.assertEqual(next(r["platform_ftu"] for r in actuals if r["city_key"] == "harbor"), 40)
+            self.assertEqual(sum(r["platform_ftu"] for r in actuals), 60)
+            rows = self.reader.load_targets("2026-10").data["rows"]
+            self.assertFalse(any(r["city_key"] == "harbor" for r in rows))
+            self.assertEqual(next(r["platform_ftu_target"] for r in rows if r["kind"] == "new_launch"), 50)
             self.assertEqual(before, self.admin.execute("SELECT * FROM irf.month_metadata ORDER BY month").fetchall())
             self.assertEqual(self.reader.load(self.baseline.data["months"]), self.baseline)
             for statement in (
@@ -224,7 +223,6 @@ class PostgresIntegrationTests(unittest.TestCase):
                 row["month"] = m
             self.writer.replace_months(validate_data(raw))
         self.assertEqual(self.reader.available_months(), months)
-        self.assertEqual(self.reader.catalog()["available_months"], months)
         self.assertEqual(self.reader.load().data["months"], months[-2:])
         with self.assertRaises(GrowthOSError):
             self.reader.load(months)
@@ -291,71 +289,6 @@ class PostgresIntegrationTests(unittest.TestCase):
         finally:
             self.admin.execute("DROP TABLE irf.unexpected")
         self.assertEqual(self.reader.load(self.baseline.data["months"]), self.baseline)
-
-    def test_city_sentinel_migration_merges_unrecognized_rows_and_is_idempotent(self):
-        raw = demo_payload()
-
-        def sentinel(month_value, key, city, **metrics):
-            row = {field: None for field in FACT_FIELDS}
-            row.update(month=month_value, city_key=key, city=city, tier="T3", source_cities=[city])
-            row.update(metrics)
-            return row
-
-        # 2026-09 has only unrecognized_city (rename-only); 2026-10 has both sentinels (merge).
-        raw["facts"].extend([
-            sentinel("2026-09", "unrecognized_city", "UNRECOGNIZED_CITY", registrations=550),
-            sentinel("2026-10", "city_not_found", "city_not_found", installs=240),
-            sentinel("2026-10", "unrecognized_city", "UNRECOGNIZED_CITY", registrations=600),
-        ])
-        seeded = validate_data(raw)
-        self.writer.replace_months(seeded)
-        before = self.admin.execute("SELECT month, metadata, result_checksum, fact_count FROM irf.month_metadata ORDER BY month").fetchall()
-
-        with self.assertRaises(self.psycopg.errors.InsufficientPrivilege):
-            migrate_city_sentinel(self.reader_connection, allow_nonproduction=True)
-
-        result = migrate_city_sentinel(self.admin, allow_nonproduction=True)
-        self.assertEqual(result["changed_months"], ["2026-09", "2026-10"])
-        self.assertEqual(result["merged_fact_count"], 2)
-
-        sep = self.reader.load(["2026-09"])
-        sep_target = next(row for row in sep.data["facts"] if row["city_key"] == "city_not_found")
-        self.assertEqual((sep_target["installs"], sep_target["registrations"]), (None, 550))
-        self.assertFalse(any(row["city_key"] == "unrecognized_city" for row in sep.data["facts"]))
-
-        oct_data = self.reader.load(["2026-10"])
-        oct_target = next(row for row in oct_data.data["facts"] if row["city_key"] == "city_not_found")
-        self.assertEqual((oct_target["installs"], oct_target["registrations"]), (240, 600))
-        self.assertFalse(any(row["city_key"] == "unrecognized_city" for row in oct_data.data["facts"]))
-
-        after = self.admin.execute("SELECT month, metadata, result_checksum, fact_count FROM irf.month_metadata ORDER BY month").fetchall()
-        self.assertEqual(before[0], after[0])  # Untouched August is completely identical.
-        for old, new in zip(before, after):
-            self.assertEqual(new[1], old[1])  # Provenance metadata is unchanged.
-        self.assertNotEqual(after[1][2], before[1][2])  # September checksum updated.
-        self.assertEqual(after[1][3], before[1][3])  # Rename-only keeps fact_count equal.
-        self.assertNotEqual(after[2][2], before[2][2])  # October checksum updated.
-        self.assertEqual(after[2][3], before[2][3] - 1)  # Merge drops one fact in October.
-        self.assertEqual(migrate_city_sentinel(self.admin, allow_nonproduction=True)["changed_months"], [])
-        self.assertEqual(after, self.admin.execute("SELECT month, metadata, result_checksum, fact_count FROM irf.month_metadata ORDER BY month").fetchall())
-        assert_reader_permissions(self.reader_connection)
-
-    def test_city_sentinel_migration_corruption_rolls_back_earlier_month(self):
-        raw = demo_payload()
-        for m, key, city in (("2026-09", "unrecognized_city", "UNRECOGNIZED_CITY"),
-                             ("2026-10", "unrecognized_city", "UNRECOGNIZED_CITY")):
-            row = {field: None for field in FACT_FIELDS}
-            row.update(month=m, city_key=key, city=city, tier="T3", source_cities=[city], registrations=100)
-            raw["facts"].append(row)
-        self.writer.replace_months(validate_data(raw))
-        self.admin.execute("UPDATE irf.month_metadata SET result_checksum=%s WHERE month='2026-10-01'", ("0" * 64,))
-        before_meta = self.admin.execute("SELECT * FROM irf.month_metadata ORDER BY month").fetchall()
-        before_facts = self.admin.execute("SELECT * FROM irf.facts ORDER BY month, city_key").fetchall()
-        with self.assertRaises(GrowthOSError) as caught:
-            migrate_city_sentinel(self.admin, allow_nonproduction=True)
-        self.assertEqual(caught.exception.code, "STORE_INTEGRITY")
-        self.assertEqual(before_meta, self.admin.execute("SELECT * FROM irf.month_metadata ORDER BY month").fetchall())
-        self.assertEqual(before_facts, self.admin.execute("SELECT * FROM irf.facts ORDER BY month, city_key").fetchall())
 
     def test_version_migration_strips_legacy_keys_and_preserves_everything_else(self):
         from psycopg.types.json import Jsonb

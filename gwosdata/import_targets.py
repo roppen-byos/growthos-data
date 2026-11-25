@@ -7,12 +7,11 @@ from itertools import islice
 from pathlib import Path
 import re
 
-from growthos.analysis import target_city_review
-from growthos.classification import resolve_city
-from growthos.contracts import MAX_FACTS, MAX_MONTHS, month, text
-from growthos.errors import SafeParser, execute_cli, reject
-from growthos.postgres import PostgresStore
-from growthos.targets import METRICS, target_schema_sql, validate_targets
+from .classification import resolve_city
+from .contracts import MAX_FACTS, MAX_MONTHS, month, text
+from .errors import SafeParser, execute_cli, reject
+from .postgres import PostgresStore
+from .targets import METRICS, target_city_review, target_schema_sql, validate_targets
 
 from .migrate_monthly import run
 

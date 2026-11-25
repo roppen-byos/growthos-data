@@ -6,7 +6,7 @@ import unittest
 from contextlib import redirect_stdout
 from unittest.mock import MagicMock, patch
 
-from growthos.errors import GrowthOSError
+from gwosdata.errors import GrowthOSError
 from gwosdata.import_targets import (
     import_connection, main, parse_csv, _plan_values, _stored_values,
 )

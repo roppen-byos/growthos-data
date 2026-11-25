@@ -1,9 +1,9 @@
 """Owner-only atomic migration: legacy PFTU targets to the unified two-metric table."""
 
-from growthos.contracts import MAX_FACTS, month
-from growthos.errors import SafeParser, execute_cli, reject
-from growthos.postgres import read_target_month
-from growthos.targets import target_schema_sql, validate_targets
+from .contracts import MAX_FACTS, month
+from .errors import SafeParser, execute_cli, reject
+from .postgres import read_target_month
+from .targets import target_schema_sql, validate_targets
 
 from .import_targets import _grant_reader
 from .migrate_monthly import run
