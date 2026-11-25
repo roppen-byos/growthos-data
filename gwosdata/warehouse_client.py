@@ -21,7 +21,7 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 from .classification import UNATTRIBUTED_CITY_KEY, UNATTRIBUTED_SOURCE_KEYS
-from .contracts import BUSINESS_TIMEZONE, canonical_json, month, next_month
+from .contracts import BUSINESS_TIMEZONE, month, next_month
 from .errors import GrowthOSError, reject
 
 PINNED_TRINO = "0.336.0"
@@ -89,14 +89,6 @@ class MonthWindow:
     @property
     def date_parameters(self) -> tuple[str, str]:
         return self.start.isoformat(), self.end.isoformat()
-
-    def evidence(self) -> dict:
-        return {
-            "month": self.value,
-            "start_date": self.start.isoformat(),
-            "end_date_exclusive": self.end.isoformat(),
-            "business_timezone": BUSINESS_TIMEZONE,
-        }
 
 
 class Operation(str, Enum):
@@ -499,10 +491,6 @@ class WarehouseSession:
     def nonproduction(self) -> bool:
         return self._factory is not None
 
-    @property
-    def endpoint_fingerprint(self) -> str:
-        return hashlib.sha256(f"{self.config.host}:{self.config.port}/{self.config.catalog}".encode()).hexdigest()
-
     def __enter__(self):
         return self
 
@@ -616,12 +604,8 @@ class WarehouseSession:
             raise
         self._cursor = None
         return {
-            "operation": operation.value, "query_checksum": spec.checksum,
-            "result_checksum": hashlib.sha256(canonical_json(rows)).hexdigest(),
-            "catalog": self.config.catalog, "endpoint_fingerprint": self.endpoint_fingerprint,
-            "window": window.evidence(), "started_at": started_at,
-            "completed_at": datetime.now(timezone.utc).isoformat(), "nonproduction": self.nonproduction,
-            "rows": rows, "row_count": len(rows), "omitted_row_count": 0,
+            "started_at": started_at, "completed_at": datetime.now(timezone.utc).isoformat(),
+            "rows": rows,
         }
 
     @staticmethod

@@ -7,8 +7,9 @@ from unittest.mock import MagicMock, patch
 from fixtures import demo_payload
 from gwosdata.contracts import FACT_FIELDS, checksum, month, validate_data
 from gwosdata.errors import GrowthOSError
-from gwosdata.migrate_monthly import run
-from gwosdata.postgres import PostgresStore, validate_reader_settings
+from gwosdata.owner import run
+from gwosdata.postgres import validate_reader_settings
+from postgres_reader import PostgresStore
 from gwosdata.targets import TARGET_DB_FIELDS
 from gwosdata.import_targets import parse_csv
 from test_import_targets import SOURCE
@@ -78,10 +79,10 @@ class OwnerSettingsTests(unittest.TestCase):
         configs = {name: {"host": "db.invalid", "dbname": "growthos", "sslmode": "verify-full", "user": name}
                    for name in ("owner", "writer", "reader")}
         conninfo.conninfo_to_dict = lambda value: configs[value]
-        migration = MagicMock(return_value={"migrated": True})
+        operation = MagicMock(return_value={"imported": True})
         with patch.dict(sys.modules, {"psycopg": driver, "psycopg.conninfo": conninfo}), \
-                patch("gwosdata.migrate_monthly.local_setting", side_effect=["owner", "writer", "reader"]) as setting:
-            self.assertEqual(run(migration), {"migrated": True})
+                patch("gwosdata.owner.local_setting", side_effect=["owner", "writer", "reader"]) as setting:
+            self.assertEqual(run(operation), {"imported": True})
         root = Path(__file__).resolve().parents[1]
         self.assertEqual([call.args for call in setting.call_args_list], [
             ("GROWTHOS_OWNER_DSN", root / ".env"),
@@ -90,7 +91,7 @@ class OwnerSettingsTests(unittest.TestCase):
         ])
         driver.connect.assert_called_once()
         self.assertEqual(driver.connect.call_args.kwargs["user"], "owner")
-        self.assertEqual(migration.call_args.args[1:], ("writer", "reader"))
+        self.assertEqual(operation.call_args.args[1:], ("writer", "reader"))
 
     def test_distinct_logins_and_same_endpoint_remain_required_before_connection(self):
         for fault in ("same_login", "other_endpoint"):
@@ -101,7 +102,7 @@ class OwnerSettingsTests(unittest.TestCase):
             configs["reader"]["user" if fault == "same_login" else "host"] = "owner" if fault == "same_login" else "other.invalid"
             conninfo.conninfo_to_dict = lambda value: configs[value]
             with patch.dict(sys.modules, {"psycopg": driver, "psycopg.conninfo": conninfo}), \
-                    patch("gwosdata.migrate_monthly.local_setting", side_effect=["owner", "writer", "reader"]), \
+                    patch("gwosdata.owner.local_setting", side_effect=["owner", "writer", "reader"]), \
                     self.subTest(fault=fault), self.assertRaises(GrowthOSError):
                 run(MagicMock())
             driver.connect.assert_not_called()

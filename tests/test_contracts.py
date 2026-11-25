@@ -5,9 +5,6 @@ from fixtures import demo_payload
 from gwosdata.classification import resolve_city
 from gwosdata.contracts import FACT_FIELDS, FUNNEL_VOLUMES, checksum, month_range, validate_data
 from gwosdata.errors import GrowthOSError
-from gwosdata.import_targets import parse_csv
-from gwosdata.targets import target_city_review
-from test_import_targets import SOURCE
 
 
 class ContractTests(unittest.TestCase):
@@ -77,18 +74,3 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(resolve_city("Pune")[1:3], ("Pune", "T2"))
         self.assertEqual(resolve_city("new_town", "New Town"), ("new_town", "New Town", "T3", ["New Town"]))
         self.assertEqual(resolve_city("UNRECOGNIZED_CITY"), ("city_not_found", "city_not_found", "T3", ["city_not_found"]))
-
-    def test_one_time_review_preserves_exact_threshold_and_missing_operands(self):
-        plans = parse_csv(SOURCE, "platform_ftu")
-        raw = demo_payload()
-        row = next(r for r in raw["facts"] if r["month"] == "2026-10")
-        row.update(city_key="trivandrum", city="Trivandrum", source_cities=["Trivandrum"])
-        for actual, qualifies in ((114, False), (113, True)):
-            row["platform_ftu"] = actual
-            result = target_city_review(validate_data(raw), plans[1], "trivandrum")
-            self.assertEqual(result["variance"], actual - 120)
-            self.assertEqual(result["above_5_percent"], qualifies)
-            self.assertEqual(result["target_checksum"], plans[1].result_checksum)
-        result = target_city_review(validate_data(raw), plans[1], "missing_city")
-        self.assertIsNone(result["variance"])
-        self.assertEqual(result["unavailable_reason"], "missing_target_or_actual")

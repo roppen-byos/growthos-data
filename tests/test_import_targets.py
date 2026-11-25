@@ -118,14 +118,15 @@ class TargetImportTests(unittest.TestCase):
         with patch("gwosdata.import_targets._stored_months", return_value=["2026-09", "2026-10"]), \
                 patch("gwosdata.import_targets._stored_values",
                       side_effect=lambda conn, value, metric: _plan_values(expected[value], metric)), \
-                patch("gwosdata.import_targets._grant_reader") as grants, \
-                patch("gwosdata.import_targets._merge_review", return_value=[]):
+                patch("gwosdata.import_targets._grant_reader") as grants:
             result = import_connection(connection, "writer", "reader", plans, "platform_ftu")
         self.assertFalse(result["imported"])
         self.assertEqual(result["metric"], "platform_ftu")
+        self.assertNotIn("merged_city_review", result)
         grants.assert_called_once()
         self.assertTrue(all("INSERT" not in str(call) and "CREATE TABLE" not in str(call)
                             for call in connection.execute.call_args_list))
+        connection.cursor.assert_not_called()  # No historical actuals read for an import review.
         with patch("gwosdata.import_targets._stored_months", return_value=["2026-09"]), \
                 patch("gwosdata.import_targets._grant_reader") as grants:
             with self.assertRaises(GrowthOSError) as caught:
@@ -151,7 +152,7 @@ class TargetImportTests(unittest.TestCase):
                 patch("gwosdata.import_targets._grant_reader") as grants:
             result = import_connection(connection, "writer", "reader", plans, "registrations")
         self.assertTrue(result["imported"])
-        self.assertEqual(result["merged_city_review"], [])
+        self.assertNotIn("merged_city_review", result)
         grants.assert_called_once()
         statements = [str(call) for call in connection.execute.call_args_list]
         self.assertTrue(any("CREATE TABLE irf.targets" in s for s in statements))

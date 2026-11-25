@@ -10,10 +10,9 @@ import re
 from .classification import resolve_city
 from .contracts import MAX_FACTS, MAX_MONTHS, month, text
 from .errors import SafeParser, execute_cli, reject
-from .postgres import PostgresStore
-from .targets import METRICS, target_city_review, target_schema_sql, validate_targets
+from .targets import METRICS, target_schema_sql, validate_targets
 
-from .migrate_monthly import run
+from .owner import run
 
 MAX_CSV_BYTES = 4 * 1024 * 1024
 METRIC_COLUMNS = {"platform_ftu": "platform_ftu_target", "registrations": "registrations_target"}
@@ -127,19 +126,6 @@ def _grant_reader(connection, writer_role, reader_role):
         reject("READ_ONLY_ROLE", "Target reader must have SELECT-only access and no schema creation privileges.")
 
 
-def _merge_review(connection, targets):
-    store = PostgresStore(connection)
-    available = store.available_months()
-    by_month = {p.data["month"]: p for p in targets}
-    review = []
-    for value in ("2026-09", "2026-10"):
-        if value not in by_month or value not in available:
-            review.append({"month": value, "city_key": "trivandrum", "status": "target_or_actual_unavailable"})
-        else:
-            review.append(target_city_review(store.load([value]), by_month[value], "trivandrum"))
-    return review
-
-
 def _stored_months(connection, metric):
     rows = connection.execute(
         "SELECT month FROM irf.target_imports WHERE metric=%s ORDER BY month LIMIT %s",
@@ -205,10 +191,9 @@ def import_connection(connection, writer_role, reader_role, targets, metric="pla
                 if _stored_values(connection, value, metric) != _plan_values(plan, metric):
                     reject("STORE_INTEGRITY", "Imported targets differ from the validated CSV; import rolled back.")
         _grant_reader(connection, writer_role, reader_role)
-        review = _merge_review(connection, targets) if metric == "platform_ftu" else []
     return {"operation": "import-targets", "metric": metric, "imported": imported,
             "months": sorted(expected),
-            "record_count": sum(len(p.data["rows"]) for p in targets), "merged_city_review": review}
+            "record_count": sum(len(p.data["rows"]) for p in targets)}
 
 
 def main(argv=None):

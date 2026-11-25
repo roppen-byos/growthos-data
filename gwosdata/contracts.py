@@ -112,10 +112,6 @@ def reporting_schema_sql() -> str:
     return files("gwosdata").joinpath("sql/001_reporting.sql").read_text(encoding="utf-8")
 
 
-def funnel_metrics_sql() -> str:
-    return files("gwosdata").joinpath("sql/003_funnel_metrics.sql").read_text(encoding="utf-8")
-
-
 @dataclass(frozen=True)
 class MonthlyData:
     """Detached bounded observations, not a stored or recoverable historical version."""

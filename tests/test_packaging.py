@@ -8,7 +8,7 @@ import tempfile
 import tomllib
 import unittest
 
-from gwosdata.contracts import funnel_metrics_sql, reporting_schema_sql
+from gwosdata.contracts import reporting_schema_sql
 from gwosdata.targets import target_schema_sql
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,7 +24,7 @@ class StandalonePackagingTests(unittest.TestCase):
         self.assertIn("sql/*.sql", config["tool"]["setuptools"]["package-data"]["gwosdata"])
         self.assertIn("CREATE TABLE irf.facts", reporting_schema_sql())
         self.assertIn("CREATE TABLE irf.targets", target_schema_sql())
-        self.assertIn("ADD COLUMN IF NOT EXISTS fe_sessions", funnel_metrics_sql())
+        self.assertIn("fe_sessions bigint", reporting_schema_sql())
 
     def test_clean_checkout_plan_and_all_cli_imports_need_no_other_checkout_or_site_packages(self):
         with tempfile.TemporaryDirectory(prefix="gwos-data-standalone-", dir="/tmp/opencode") as temp:
@@ -42,11 +42,11 @@ class StandalonePackagingTests(unittest.TestCase):
             code = """
 import importlib
 from pathlib import Path
-from gwosdata.contracts import reporting_schema_sql, funnel_metrics_sql
+from gwosdata.contracts import reporting_schema_sql
 from gwosdata.targets import target_schema_sql
 for path in Path('gwosdata').glob('*.py'):
     importlib.import_module('gwosdata.' + path.stem)
-assert reporting_schema_sql() and target_schema_sql() and funnel_metrics_sql()
+assert reporting_schema_sql() and target_schema_sql()
 """
             result = subprocess.run([sys.executable, "-S", "-c", code], cwd=checkout,
                                     env=env, capture_output=True, text=True, timeout=15)

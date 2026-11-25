@@ -168,7 +168,10 @@ class WarehouseTests(unittest.TestCase):
         self.assertIn(url, terminal.getvalue())
 
         self.session.authorize(self.window)
-        self.session.run(Operation.INSTALLS_MONTHLY, self.window)
+        result = self.session.run(Operation.INSTALLS_MONTHLY, self.window)
+        self.assertEqual(set(result), {"rows", "started_at", "completed_at"})
+        self.assertEqual(result["rows"][0]["installs"], 100)
+        self.assertLessEqual(result["started_at"], result["completed_at"])
         for sql, params in self.connection.executed_calls:
             self.assertEqual(params, ())
             self.assertNotIn("?", sql)
