@@ -7,7 +7,7 @@ from importlib.resources import files
 import json
 import re
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from .errors import reject
@@ -32,6 +32,8 @@ MAX_FACTS = 20_000
 MAX_MONTHS = 12
 TOP_FIELDS = {"nonproduction", "months", "month_metadata", "facts"}
 METADATA_FIELDS = {"month", "extracted_at", "business_timezone", "source_reads"}
+# Month-to-date metadata adds the inclusive landed cutoff; ended months never carry one.
+MTD_METADATA_FIELDS = {*METADATA_FIELDS, "cutoff_date"}
 REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,119}\Z")
 
 
@@ -124,8 +126,18 @@ class MonthlyData:
         return json.loads(self.payload)
 
 
+def calendar_day(value: object) -> date:
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+        reject("DATE", "Use an unambiguous calendar date in YYYY-MM-DD format.")
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        reject("DATE", "Invalid calendar date.")
+
+
 def validate_metadata(raw: object, *, now: datetime | None = None) -> None:
-    exact_fields(raw, METADATA_FIELDS)
+    if not isinstance(raw, dict) or set(raw) not in (METADATA_FIELDS, MTD_METADATA_FIELDS):
+        exact_fields(raw, METADATA_FIELDS)
     value = month(raw["month"])
     extracted = timestamp(raw["extracted_at"])
     if extracted > (now or datetime.now(timezone.utc)):
@@ -133,8 +145,15 @@ def validate_metadata(raw: object, *, now: datetime | None = None) -> None:
     if raw["business_timezone"] != BUSINESS_TIMEZONE:
         reject("TIMEZONE", f"Business timezone must be {BUSINESS_TIMEZONE}.")
     zone = ZoneInfo(BUSINESS_TIMEZONE)
-    if value >= extracted.astimezone(zone).date().replace(day=1):
-        reject("INCOMPLETE_MONTH", "Only ended calendar months may be fetched or reported.")
+    extracted_day = extracted.astimezone(zone).date()
+    if "cutoff_date" in raw:
+        # Month-to-date: the inclusive cutoff lies inside its month, before both month end and the extraction day
+        # (an extraction may finish after midnight, even into the next month).
+        cutoff = calendar_day(raw["cutoff_date"])
+        if not value <= cutoff < min(next_month(value) - timedelta(days=1), extracted_day):
+            reject("INCOMPLETE_MONTH", "A month-to-date cutoff must fall inside its month, before its last day and the extraction day.")
+    elif value >= extracted_day.replace(day=1):
+        reject("INCOMPLETE_MONTH", "Only ended calendar months or explicit month-to-date cutoffs may be fetched or reported.")
     reads = raw["source_reads"]
     if not isinstance(reads, list) or len(reads) not in (len(SOURCES), len(ALL_SOURCES)):
         reject("PROVENANCE", "Each month needs Installs, Registrations, FTU and optionally funnel read evidence.")

@@ -16,7 +16,7 @@ from gwosdata.errors import GrowthOSError
 from gwosdata.warehouse_cli import WarehouseExtractor, extraction_environment, fetch_data, main
 from gwosdata.postgres import local_setting
 from gwosdata.warehouse_client import (
-    BIKE_SERVICES, MonthWindow, Operation, WarehouseConfig, WarehouseSession,
+    BIKE_SERVICES, LANDED_OPERATIONS, MonthWindow, Operation, WarehouseConfig, WarehouseSession,
     _default_connection, operator_environment, query_for, read_operator_file, show_authorization_url,
 )
 
@@ -75,17 +75,20 @@ class FakeConnection:
             Operation.FUNNEL_MONTHLY: [("delhi", "Delhi", 1000, 800, 700, 300, 250, 200, 180, 150, 140)],
         }
         self.month_rows = {}
-        self.lookup = {
-            (query_for(op, w).sql, query_for(op, w).parameters): (op, w)
-            for w in self.windows for op in Operation
-        }
-        self.rendered_lookup = {
-            (query_for(op, w).render(), ()): (op, w)
-            for w in self.windows for op in Operation
-        }
+        self.lookup, self.rendered_lookup = {}, {}
+        for w in self.windows:
+            self.register(w)
         self.operations, self.fetches, self.cursors, self.executed_calls = [], [], [], []
         self.columns, self.hooks = {}, {}
         self.closed = Event()
+
+    def register(self, window):
+        for op in Operation:
+            if op in LANDED_OPERATIONS and window.through is None:
+                continue  # The landed-date probe exists only for month-to-date windows.
+            spec = query_for(op, window)
+            self.lookup[(spec.sql, spec.parameters)] = (op, window)
+            self.rendered_lookup[(spec.render(), ())] = (op, window)
 
     def cursor(self):
         cursor = FakeCursor(self)

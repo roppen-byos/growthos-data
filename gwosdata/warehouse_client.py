@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from collections import ChainMap
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from importlib.metadata import version
 import hashlib
@@ -64,23 +64,52 @@ def _service_list(names: tuple[str, ...]) -> str:
     return ", ".join("'" + name.replace("'", "''") + "'" for name in names)
 
 
+def business_today() -> date:
+    return datetime.now(timezone.utc).astimezone(ZoneInfo(BUSINESS_TIMEZONE)).date()
+
+
 @dataclass(frozen=True)
 class MonthWindow:
+    """An ended calendar month, or the current month through an inclusive past cutoff."""
+
     value: str
+    through: date | None = None
+    # The business day a month-to-date request started; one extraction never re-reads the clock.
+    as_of: date | None = field(default=None, compare=False)
 
     def __post_init__(self):
         start = month(self.value)
-        current = datetime.now(timezone.utc).astimezone(ZoneInfo(BUSINESS_TIMEZONE)).date().replace(day=1)
-        if start >= current:
-            reject("INCOMPLETE_MONTH", "Warehouse extraction requires explicitly ended calendar months.")
+        today = self.as_of or business_today()
+        if self.through is None:
+            if start >= today.replace(day=1):
+                reject("INCOMPLETE_MONTH", "Warehouse extraction requires explicitly ended calendar months.")
+        elif (not isinstance(self.through, date) or isinstance(self.through, datetime)
+              or start != today.replace(day=1) or not start <= self.through < today):
+            reject("INCOMPLETE_MONTH", "Month-to-date extraction requires the current month through a day before today; "
+                   "on the 1st no current-month day has ended yet, so refresh the previous month as a complete month.")
+
+    @classmethod
+    def month_to_date(cls, value: str) -> "MonthWindow":
+        """Current-month probe window through yesterday; the landed cutoff may be earlier."""
+        today = business_today()
+        return cls(value, today - timedelta(days=1), as_of=today)
+
+    def cut(self, cutoff: date) -> "MonthWindow":
+        """The same request cut at a landed day, validated against the request's own start day."""
+        return MonthWindow(self.value, cutoff, as_of=self.as_of)
 
     @property
     def start(self):
         return month(self.value)
 
     @property
+    def lookback_start(self):
+        """Landed-date probes scan at most the last seven days of a month-to-date window."""
+        return max(self.start, self.through - timedelta(days=LANDED_LOOKBACK_DAYS - 1))
+
+    @property
     def end(self):
-        return next_month(self.start)
+        return next_month(self.start) if self.through is None else self.through + timedelta(days=1)
 
     @property
     def day_parameters(self) -> tuple[str, str]:
@@ -97,6 +126,11 @@ class Operation(str, Enum):
     REGISTRATIONS_MONTHLY = "registrations-monthly"
     FTU_MONTHLY = "ftu-monthly"
     FUNNEL_MONTHLY = "funnel-monthly"
+    LANDED_INSTALLS = "landed-installs"
+    LANDED_REGISTRATIONS = "landed-registrations"
+    LANDED_FTU = "landed-ftu"
+    LANDED_FUNNEL = "landed-funnel"
+    LANDED_FIRST_RIDE_LOOKUP = "landed-first-ride-lookup"
 
 
 EXTRACTION_OPERATIONS = (
@@ -106,6 +140,45 @@ EXTRACTION_OPERATIONS = (
 )
 FUNNEL_OPERATIONS = (Operation.FUNNEL_MONTHLY,)
 ALL_OPERATIONS = EXTRACTION_OPERATIONS + FUNNEL_OPERATIONS
+LANDED_OPERATIONS = {
+    Operation.LANDED_INSTALLS: "installs",
+    Operation.LANDED_REGISTRATIONS: "registrations",
+    Operation.LANDED_FTU: "ftu",
+    Operation.LANDED_FUNNEL: "funnel",
+    Operation.LANDED_FIRST_RIDE_LOOKUP: "first_ride_lookup",
+}
+
+# Month-to-date only: one bounded probe per source for its latest landed day in
+# the lookback window, so each scan gets its own time budget. The funnel's
+# first-ride lookup partition must also exist for the cutoff day.
+LANDED_LOOKBACK_DAYS = 7
+_LANDED_SQL = {
+    "installs": ("""
+SELECT CAST(max(yyyymmdd) AS varchar) AS latest
+FROM appsflyer.canonical_appsflyer_customer_install
+WHERE yyyymmdd >= ? AND yyyymmdd < ?
+""".strip(), "day"),
+    "registrations": ("""
+SELECT CAST(max(yyyymmdd) AS varchar) AS latest
+FROM entity.users_snapshot
+WHERE yyyymmdd >= ? AND yyyymmdd < ?
+""".strip(), "day"),
+    "ftu": ("""
+SELECT CAST(max(order_date) AS varchar) AS latest
+FROM customer.customer_order_channel_attribution_master
+WHERE cast(order_date AS varchar) >= ? AND cast(order_date AS varchar) < ?
+""".strip(), "date"),
+    "funnel": ("""
+SELECT CAST(max(day) AS varchar) AS latest
+FROM hive.datasets.customer_rf_daily_kpi_old_ct
+WHERE day >= ? AND day < ?
+""".strip(), "date"),
+    "first_ride_lookup": ("""
+SELECT CAST(max(day) AS varchar) AS latest
+FROM customer_internal.customer_first_ride_lookup_immutable
+WHERE day >= date(?) AND day < date(?)
+""".strip(), "date"),
+}
 
 _INSTALLS_MONTHLY = f"""
 WITH mapped AS (
@@ -269,6 +342,13 @@ def query_for(operation: Operation, window: MonthWindow) -> QuerySpec:
         reject("OPERATION", "Only registered warehouse operations and validated month windows are supported.")
     if operation == Operation.AUTHORIZE:
         return QuerySpec("SELECT 1 AS ready", (), ("ready",), "authorization")
+    if operation in LANDED_OPERATIONS:
+        if window.through is None:
+            reject("OPERATION", "Landed-date probes apply only to month-to-date windows.")
+        sql, style = _LANDED_SQL[LANDED_OPERATIONS[operation]]
+        bounds = (window.lookback_start, window.end)
+        params = tuple(d.strftime("%Y%m%d") if style == "day" else d.isoformat() for d in bounds)
+        return QuerySpec(sql, params, ("latest",), "landed_date")
     if operation == Operation.INSTALLS_MONTHLY:
         return QuerySpec(_INSTALLS_MONTHLY, window.day_parameters, (
             "canonical_city_key", "sample_source_city", "installs",
@@ -348,7 +428,7 @@ class WarehouseConfig:
     catalog: str = "hive"
     port: int = 443
     request_timeout: float = 30
-    query_timeout: float = 120
+    query_timeout: float = 480
     authorization_timeout: float = 180
     total_timeout: float = 600
 
@@ -361,7 +441,7 @@ class WarehouseConfig:
             reject("WAREHOUSE_CONFIG", "Warehouse catalog must be a bounded identifier.")
         if type(self.port) is not int or not 1 <= self.port <= 65535:
             reject("WAREHOUSE_CONFIG", "Warehouse port is invalid.")
-        for value, maximum in ((self.request_timeout, 30), (self.query_timeout, 120), (self.authorization_timeout, 180), (self.total_timeout, 600)):
+        for value, maximum in ((self.request_timeout, 30), (self.query_timeout, 480), (self.authorization_timeout, 180), (self.total_timeout, 600)):
             if type(value) not in (int, float) or not math.isfinite(value) or not 0.01 <= value <= maximum:
                 reject("WAREHOUSE_CONFIG", "Warehouse time budgets must be finite, positive and within approved caps.")
 
@@ -444,13 +524,18 @@ def _bounded_string(value: object) -> bool:
 def _validate_rows(spec: QuerySpec, rows: object) -> list[dict]:
     if not isinstance(rows, (list, tuple)):
         reject("WAREHOUSE_SCHEMA", "Warehouse aggregate rows are unavailable; no partial evidence emitted.")
-    if spec.kind == "authorization" and len(rows) != 1:
+    if spec.kind in ("authorization", "landed_date") and len(rows) != 1:
         reject("WAREHOUSE_SCHEMA", "A scalar aggregate must return exactly one row.")
     result, grain = [], set()
     for raw in rows:
         if not isinstance(raw, (list, tuple)) or len(raw) != len(spec.columns):
             reject("WAREHOUSE_SCHEMA", "Warehouse aggregate shape is invalid; raw fields and values withheld.")
         row = dict(zip(spec.columns, raw))
+        if spec.kind == "landed_date":
+            if any(value is not None and not _bounded_string(value) for value in raw):
+                reject("WAREHOUSE_VALUE", "Landed source dates must be bounded text or unavailable.")
+            result.append(row)
+            continue
         count_fields = spec.columns
         if spec.kind == "city_counts":
             if not _bounded_string(raw[0]) or not _bounded_string(raw[1]):
@@ -526,10 +611,10 @@ class WarehouseSession:
             while not done.wait(0.02):
                 self._checkpoint()
                 if time.monotonic() >= deadline:
-                    reject("WAREHOUSE_TIMEOUT", "Warehouse operation exceeded its time budget.")
+                    reject("WAREHOUSE_TIMEOUT", f"Warehouse {operation_name} exceeded its time budget.")
             self._checkpoint()
             if time.monotonic() >= deadline:
-                reject("WAREHOUSE_TIMEOUT", "Warehouse operation exceeded its time budget.")
+                reject("WAREHOUSE_TIMEOUT", f"Warehouse {operation_name} exceeded its time budget.")
         except BaseException:
             self.close()
             raise
@@ -633,3 +718,30 @@ class WarehouseSession:
         cursor, connection = self._cursor, self._connection
         self._cursor = self._connection = None
         self._cleanup(cursor=cursor, connection=connection, cancel=True)
+
+
+def landed_day(value: object) -> date | None:
+    """Parse a warehouse `YYYYMMDD` or ISO date/timestamp label; anything else is unavailable."""
+    if not isinstance(value, str):
+        return None
+    if re.fullmatch(r"[0-9]{8}", value):
+        value = f"{value[:4]}-{value[4:6]}-{value[6:]}"
+    if not re.match(r"[0-9]{4}-[0-9]{2}-[0-9]{2}(?![0-9])", value):
+        return None
+    try:
+        return date.fromisoformat(value[:10])
+    except ValueError:
+        return None
+
+
+def landed_cutoff(probe: MonthWindow, latest: dict) -> date:
+    """Oldest latest-landed day across every source, bounded by the probe lookback window."""
+    if set(latest) != set(LANDED_OPERATIONS.values()):
+        reject("COVERAGE", "Every month-to-date source needs a landed-date probe; nothing was published.")
+    days = {source: landed_day(value) for source, value in latest.items()}
+    stale = sorted(source for source, day in days.items()
+                   if day is None or not probe.lookback_start <= day <= probe.through)
+    if stale:
+        window = (probe.through - probe.lookback_start).days + 1
+        reject("COVERAGE", f"No landed data in the last {window} days for: {', '.join(stale)}; nothing was published.")
+    return min(days.values())
